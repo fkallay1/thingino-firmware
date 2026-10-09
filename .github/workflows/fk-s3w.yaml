@@ -82,10 +82,12 @@ jobs:
         run: |
           B="${{ matrix.board }}"
           mkdir -p /tmp/out
-          cp -v ${HOME}/output/${B}*/images/thingino-${B}*.bin* /tmp/out/ || true
-          cp -v ${HOME}/output/${B}*/images/u-boot-lzo-with-spl.bin /tmp/out/ || true
-          cp -v ${HOME}/output/${B}*/images/uImage /tmp/out/ || true
-          cp -v ${HOME}/output/${B}*/.config /tmp/out/buildroot.config || true
+          IMG=$(find "$GITHUB_WORKSPACE/output" "$HOME/output" -type d -path "*${B}*/images" 2>/dev/null | head -n 1)
+          echo "images dir: $IMG"
+          test -n "$IMG"
+          ls -la "$IMG"
+          cp -v "$IMG"/thingino-${B}*.bin* "$IMG"/u-boot-lzo-with-spl.bin "$IMG"/uImage /tmp/out/
+          cp -v "$IMG"/../.config /tmp/out/buildroot.config
           ls -la /tmp/out
 
       - name: Upload firmware
