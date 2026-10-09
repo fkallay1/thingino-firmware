@@ -80,15 +80,20 @@ jobs:
 
       - name: Collect images
         run: |
+          set +e +o pipefail
           B="${{ matrix.board }}"
           mkdir -p /tmp/out
-          IMG=$(find "$GITHUB_WORKSPACE/output" "$HOME/output" -type d -path "*${B}*/images" 2>/dev/null | head -n 1)
-          echo "images dir: $IMG"
-          test -n "$IMG"
+          find "$GITHUB_WORKSPACE/output" -maxdepth 3 -type d | head -n 40
+          FW=$(find "$GITHUB_WORKSPACE/output" -type f -name "thingino-${B}.bin" | head -n 1)
+          echo "firmware: $FW"
+          if [ -z "$FW" ]; then echo "firmware image not found"; exit 1; fi
+          IMG=$(dirname "$FW")
           ls -la "$IMG"
-          cp -v "$IMG"/thingino-${B}*.bin* "$IMG"/u-boot-lzo-with-spl.bin "$IMG"/uImage /tmp/out/
+          cp -v "$IMG"/thingino-${B}*.bin* /tmp/out/
+          cp -v "$IMG"/u-boot-lzo-with-spl.bin "$IMG"/uImage /tmp/out/
           cp -v "$IMG"/../.config /tmp/out/buildroot.config
           ls -la /tmp/out
+          test -s "/tmp/out/thingino-${B}.bin"
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
