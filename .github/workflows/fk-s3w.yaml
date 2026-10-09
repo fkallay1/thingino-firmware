@@ -1,0 +1,102 @@
+name: fk-s3w
+on:
+  push:
+    branches: [fk-build-s3w-1004]
+  workflow_dispatch:
+
+env:
+  BR2_DL_DIR: ~/dl
+  FORCE_UNSAFE_CONFIGURE: 1
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  TERM: linux
+  TZ: UTC
+
+jobs:
+  buildroot:
+    name: ${{ matrix.board }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - sonoff_s3w_t23n_sc200ai_atb6132cu
+    steps:
+      - name: Install GitHub CLI to container
+        run: |
+          apt-get update
+          apt-get install -y curl
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt-get update
+
+      - name: Install build dependencies
+        run: |
+          apt-get install -y --no-install-recommends --no-install-suggests autoconf build-essential bc cmake cpio curl ca-certificates dosfstools file git gh locales make gawk jq lzop m4 mtools p7zip-full parted perl python3 python3-gmpy2 python3-setuptools procps rsync tzdata u-boot-tools unzip wget libgmp-dev libncurses-dev swig python3-dev libssl-dev
+
+      - name: Setup gh workspace to container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout repository source
+        uses: actions/checkout@v5
+        with:
+          submodules: 'true'
+          fetch-depth: "1"
+
+      - name: Setup cache directories
+        run: |
+          mkdir -p ~/.ccache ~/dl
+
+      - name: Fetch buildroot-dl-cache from upstream
+        continue-on-error: true
+        run: |
+          REPO="themactep/thingino-firmware"
+          RELEASE_TAG=$(gh release list --repo "$REPO" --limit 200 --json name,tagName | jq -r '.[] | select(.name=="buildroot-dl-cache") | .tagName' | sort -r | head -1)
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(gh release list --repo "$REPO" --limit 200 --json tagName | jq -r '.[] | select(.tagName | startswith("update_cache")) | .tagName' | head -n 1)
+          fi
+          echo "cache release: $RELEASE_TAG"
+          [ -n "$RELEASE_TAG" ] || exit 0
+          mkdir -p /tmp/dl-cache
+          gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "buildroot-dl-cache*" --dir /tmp/dl-cache
+          cd ~
+          if ls /tmp/dl-cache/buildroot-dl-cache.zip.* &>/dev/null; then
+            7z x /tmp/dl-cache/buildroot-dl-cache.zip.001 -y
+          else
+            7z x /tmp/dl-cache/buildroot-dl-cache.zip -y
+          fi
+          if [ -d ~/dl/dl ]; then mv ~/dl/dl/* ~/dl/; rm -rf ~/dl/dl; fi
+          rm -rf /tmp/dl-cache
+          find ~/dl -type f | wc -l
+
+      - name: Build firmware
+        run: |
+          BOARD=${{ matrix.board }} make fast WORKFLOW=1
+
+      - name: Collect images
+        run: |
+          set +e +o pipefail
+          B="${{ matrix.board }}"
+          mkdir -p /tmp/out
+          find "$GITHUB_WORKSPACE/output" -maxdepth 3 -type d | head -n 40
+          FW=$(find "$GITHUB_WORKSPACE/output" -type f -name "thingino-${B}.bin" | head -n 1)
+          echo "firmware: $FW"
+          if [ -z "$FW" ]; then echo "firmware image not found"; exit 1; fi
+          IMG=$(dirname "$FW")
+          ls -la "$IMG"
+          cp -v "$IMG"/thingino-${B}*.bin* /tmp/out/
+          cp -v "$IMG"/u-boot-lzo-with-spl.bin "$IMG"/uImage /tmp/out/
+          cp -v "$IMG"/../.config /tmp/out/buildroot.config
+          ls -la /tmp/out
+          test -s "/tmp/out/thingino-${B}.bin"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: thingino-${{ matrix.board }}-firmware
+          path: /tmp/out/
