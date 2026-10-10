@@ -1,0 +1,72 @@
+From: Fedor Kallay <fkallay1@gmail.com>
+Subject: [PATCH] image: add ae_it_max to cap the AE integration time
+
+The ISP auto exposure prefers a long integration time over gain, so indoor
+and dusk scenes are exposed for a full frame (40-50 ms) and anything that
+moves is smeared. IMP_ISP_Tuning_SetAe_IT_MAX and hal::isp::set_ae_it_max
+already exist but nothing calls them from the configuration.
+
+image.ae_it_max (sensor lines, 0 = ISP default) is applied at start-up and
+can be changed at runtime through the JSON API.
+---
+diff --git a/src/config/Config.cpp b/src/config/Config.cpp
+index 019e33c..2892936 100644
+--- a/src/config/Config.cpp
++++ b/src/config/Config.cpp
+@@ -545,6 +545,11 @@ std::vector<ConfigItem<int>> CFG::getIntItems() {
+        [](const int &v) { return v >= 0 && v <= 160; }},
+       {"image.max_dgain", image.max_dgain, 80,
+        [](const int &v) { return v >= 0 && v <= 160; }},
++      // Upper bound of the AE integration time in sensor lines; 0 leaves the
++      // ISP default (one full frame). Shorter values trade gain noise for
++      // less motion blur.
++      {"image.ae_it_max", image.ae_it_max, 0,
++       [](const int &v) { return v >= 0 && v <= 65535; }},
+       {"image.running_mode", image.running_mode, 0, validateInt1},
+       {"image.saturation", image.saturation, 128, validateInt255},
+       {"image.sharpness", image.sharpness, 128, validateInt255},
+diff --git a/src/config/Config.hpp b/src/config/Config.hpp
+index 2e60aab..699f7de 100644
+--- a/src/config/Config.hpp
++++ b/src/config/Config.hpp
+@@ -175,6 +175,7 @@ struct _image {
+   int backlight_compensation;
+   int max_again;
+   int max_dgain;
++  int ae_it_max;
+   int core_wb_mode;
+   int wb_rgain;
+   int wb_bgain;
+diff --git a/src/config/JsonAPI.cpp b/src/config/JsonAPI.cpp
+index e2ad46f..cf94458 100644
+--- a/src/config/JsonAPI.cpp
++++ b/src/config/JsonAPI.cpp
+@@ -379,6 +379,10 @@ void handle_image(JsonValue *obj, std::string &out, bool &sep) {
+           [] { hal::isp::set_max_again(cfg->image.max_again); });
+   add_int("max_dgain", "image.max_dgain",
+           [] { hal::isp::set_max_dgain(cfg->image.max_dgain); });
++  add_int("ae_it_max", "image.ae_it_max", [] {
++    if (cfg->image.ae_it_max > 0)
++      hal::isp::set_ae_it_max(static_cast<unsigned int>(cfg->image.ae_it_max));
++  });
+ 
+   // WB bundle
+   if (JsonValue *wbmode = obj_get(obj, "core_wb_mode");
+diff --git a/src/isp/IMPSystem.cpp b/src/isp/IMPSystem.cpp
+index d6ca895..7782088 100644
+--- a/src/isp/IMPSystem.cpp
++++ b/src/isp/IMPSystem.cpp
+@@ -582,6 +582,13 @@ int IMPSystem::init() {
+   LOG_DEBUG_OR_ERROR(ret,
+                      "hal::isp::set_max_again(" << cfg->image.max_again << ")");
+ 
++  if (cfg->image.ae_it_max > 0) {
++    ret = hal::isp::set_ae_it_max(
++        static_cast<unsigned int>(cfg->image.ae_it_max));
++    LOG_DEBUG_OR_ERROR(ret, "hal::isp::set_ae_it_max(" << cfg->image.ae_it_max
++                                                       << ")");
++  }
++
+ #if defined(PLATFORM_T20) || defined(PLATFORM_T23)
+   // Legacy XBurst1 ISP SDKs can panic in optional tuning ioctls when RMEM is
+   // tight.
