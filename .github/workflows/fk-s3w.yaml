@@ -26,6 +26,8 @@ jobs:
       matrix:
         board:
           - sonoff_s3w_t23n_sc200ai_atb6132cu
+          - sonoff_b1p_t23n_sc2336_atbm6012bx
+          - sonoff_s2_t23n_sc2336_atbm6012bx
     steps:
       - name: Install GitHub CLI to container
         run: |
