@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fedor Kallay <fkallay1@gmail.com>
+Date: Sat, 10 Oct 2026 13:30:00 +0200
+Subject: [PATCH] recording: restart timestamps on every new segment
+
+The video and audio workers reset their per-segment timestamp base only
+when they observe MP4Recorder::isActive() == false. A continuous-recording
+rollover is stop() followed at once by start(), which usually fits between
+two frames, so the new file keeps counting from the previous one: video
+starts at 60 s, 120 s, ... and audio independently, the file reports a
+duration of several minutes and the two tracks drift apart by minutes.
+
+Give the recorder a generation counter bumped on every successful start()
+and let both workers restart their base when it changes.
+---
+ src/audio/AudioWorker.cpp     |  8 ++++++++
+ src/audio/AudioWorker.hpp     |  1 +
+ src/recording/MP4Recorder.cpp |  1 +
+ src/recording/MP4Recorder.hpp | 11 +++++++++++
+ src/video/VideoWorker.cpp     | 10 ++++++++++
+ 5 files changed, 31 insertions(+)
+
+diff --git a/src/audio/AudioWorker.cpp b/src/audio/AudioWorker.cpp
+index 55ce9a6..2ac9342 100644
+--- a/src/audio/AudioWorker.cpp
++++ b/src/audio/AudioWorker.cpp
+@@ -182,6 +182,7 @@ private:
+ 
+ AudioWorker::AudioWorker(int chn)
+     : encChn(chn), mp4_audio_samples(NUM_VIDEO_CHANNELS, 0),
++      mp4_audio_generation(NUM_VIDEO_CHANNELS, 0),
+       mp4_audio_sample_rate(0), tap(std::make_unique<AudioTap>()) {
+   LOG_DEBUG("AudioWorker created for channel " << encChn);
+ }
+@@ -280,6 +281,13 @@ void AudioWorker::process_audio_frame(IMPAudioFrame &frame) {
+       mp4_audio_samples[ch] = 0;
+       continue;
+     }
++    // New segment started without this thread seeing the recorder
++    // inactive in between: restart the sample count for the new file.
++    uint32_t recorder_generation = recorder.generation();
++    if (recorder_generation != mp4_audio_generation[ch]) {
++      mp4_audio_generation[ch] = recorder_generation;
++      mp4_audio_samples[ch] = 0;
++    }
+ 
+     any_recorder_active = true;
+ 
+diff --git a/src/audio/AudioWorker.hpp b/src/audio/AudioWorker.hpp
+index 4642ea6..7091eb0 100644
+--- a/src/audio/AudioWorker.hpp
++++ b/src/audio/AudioWorker.hpp
+@@ -23,6 +23,7 @@ private:
+ 
+   int encChn;
+   std::vector<int64_t> mp4_audio_samples;
++  std::vector<uint32_t> mp4_audio_generation;
+   int mp4_audio_sample_rate = 0;
+   std::unique_ptr<AudioTap> tap;
+   std::vector<uint8_t> directEncBuf;
+diff --git a/src/recording/MP4Recorder.cpp b/src/recording/MP4Recorder.cpp
+index 07adac0..fe4505f 100644
+--- a/src/recording/MP4Recorder.cpp
++++ b/src/recording/MP4Recorder.cpp
+@@ -80,6 +80,7 @@ bool MP4Recorder::start(const std::string &path,
+     }
+   }
+ 
++  generation_.fetch_add(1, std::memory_order_release);
+   active_ = true;
+   return true;
+ }
+diff --git a/src/recording/MP4Recorder.hpp b/src/recording/MP4Recorder.hpp
+index 4fdd1b2..9f53eb6 100644
+--- a/src/recording/MP4Recorder.hpp
++++ b/src/recording/MP4Recorder.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <atomic>
++#include <cstdint>
+ #include <memory>
+ #include <mutex>
+ #include <string>
+@@ -22,6 +24,14 @@ public:
+     return active_;
+   }
+ 
++  /* Bumped on every successful start(). A writer that derives its
++   * timestamps from a per-segment base compares it to notice a new
++   * segment even when stop()+start() happened between two of its frames
++   * and it never saw isActive() go false. */
++  uint32_t generation() const {
++    return generation_.load(std::memory_order_acquire);
++  }
++
+ private:
+   void closeUnlocked();
+   void abortUnlocked();
+@@ -30,4 +40,5 @@ private:
+   std::unique_ptr<MP4Muxer> muxer_;
+   int fd_ = -1;
+   bool active_ = false;
++  std::atomic<uint32_t> generation_{0};
+ };
+diff --git a/src/video/VideoWorker.cpp b/src/video/VideoWorker.cpp
+index 94f6974..922a558 100644
+--- a/src/video/VideoWorker.cpp
++++ b/src/video/VideoWorker.cpp
+@@ -226,6 +226,7 @@ void VideoWorker::run() {
+   bool mp4_sample_is_key = false;
+   int64_t mp4_sample_ts_us = -1;
+   int64_t mp4_sample_ts_base_us = -1;
++  uint32_t mp4_segment_generation = 0;
+   bool mp4_waiting_frame_end = false;
+   bool mp4_inserted_codec_config = false;
+ 
+@@ -576,6 +577,15 @@ void VideoWorker::run() {
+           if (!recorder_accepts_samples) {
+             mp4_sample_ts_base_us = -1;
+           }
++          // A segment rollover is stop()+start() back to back and usually
++          // fits between two frames, so the inactive state above is never
++          // observed and the new file would continue on the old base.
++          // Checked on the first pack only, so a frame is never cut in two.
++          uint32_t recorder_generation = channel_recorder.generation();
++          if (i == 0 && recorder_generation != mp4_segment_generation) {
++            mp4_segment_generation = recorder_generation;
++            reset_mp4_state();
++          }
+ 
+           fps++;
+           total_frames++;
