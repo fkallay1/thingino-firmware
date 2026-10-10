@@ -179,6 +179,8 @@ typedef struct {
     struct timeval  last_day_entry;     /* last NIGHT -> DAY switch */
     struct timeval  day_lockout_until;  /* NIGHT -> DAY is not allowed before this */
     int             bounce_level;       /* consecutive NIGHT -> DAY -> NIGHT bounces */
+    int             day_entry_sig;      /* signal that triggered the last NIGHT -> DAY */
+    int             bounce_sig;         /* signal of the last failed day attempt, 0 = none */
     int             initial_night_confirm;
     int             initial_day_confirm;
     int             initial_fallback_countdown;
@@ -1145,11 +1147,16 @@ static int main_loop(void) {
        and hold night mode for a growing time before trying again. */
     const int bounce_window_s = 120;    /* back to night this soon = bounce */
     const int bounce_lockout_s = 300;   /* first hold, doubled per bounce */
-    const int bounce_lockout_max_s = 3600;
+    const int bounce_lockout_max_s = 4 * 3600;
+    /* a scene one stop brighter than at the failed attempt is a real change
+       (lights on, dawn): try again without waiting for the hold to expire */
+    const int bounce_brighter = 65536;
     const int bounce_reset_s = 600;     /* day lasted this long = level reset */
     timerclear(&g_state.last_day_entry);
     timerclear(&g_state.day_lockout_until);
     g_state.bounce_level = 0;
+    g_state.day_entry_sig = 0;
+    g_state.bounce_sig = 0;
 
     /* Log suppression */
     int last_primary_d10 = -1;
@@ -1343,7 +1350,9 @@ static int main_loop(void) {
         } else if (g_state.current_mode == MODE_NIGHT) {
             struct timeval tnow;
             gettimeofday(&tnow, NULL);
-            if (timercmp(&tnow, &g_state.day_lockout_until, <)) {
+            if (timercmp(&tnow, &g_state.day_lockout_until, <) &&
+                !(g_state.bounce_sig > 0 && sig >= 0 &&
+                  sig < g_state.bounce_sig - bounce_brighter)) {
                 g_state.day_count = 0;
             } else if (sig >= 0 && sig < day_thr) {
                 if (++g_state.day_count >= g_config.day_count_threshold)
@@ -1392,6 +1401,7 @@ static int main_loop(void) {
                     gettimeofday(&g_state.last_transition, NULL);
                     if (target_mode == MODE_DAY) {
                         g_state.last_day_entry = g_state.last_transition;
+                        g_state.day_entry_sig = sig;
                     } else if (timerisset(&g_state.last_day_entry)) {
                         long in_day = (long)(g_state.last_transition.tv_sec -
                                              g_state.last_day_entry.tv_sec);
@@ -1402,6 +1412,7 @@ static int main_loop(void) {
                                 hold *= 2;
                             if (hold > bounce_lockout_max_s) hold = bounce_lockout_max_s;
                             g_state.bounce_level++;
+                            g_state.bounce_sig = g_state.day_entry_sig;
                             g_state.day_lockout_until = g_state.last_transition;
                             g_state.day_lockout_until.tv_sec += hold;
                             log_message(LOG_INFO,
@@ -1409,6 +1420,7 @@ static int main_loop(void) {
                                         in_day, hold, g_state.bounce_level);
                         } else if (in_day >= bounce_reset_s) {
                             g_state.bounce_level = 0;
+                            g_state.bounce_sig = 0;
                         }
                     }
                     g_state.night_count = 0;
